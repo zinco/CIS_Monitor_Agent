@@ -9,6 +9,7 @@ from datetime import datetime
 from dotenv import load_dotenv
 from app.onvif_scanner import OnvifScanner
 from app.hikvision_scanner import HikvisionScanner
+from app.full_diagnostics import collect_recordings
 from app.api_client import ApiClient
 from app.network_info_scanner import NetworkInfoScanner
 from app.ping_scanner import PingScanner
@@ -459,6 +460,7 @@ def process_scan_job(
     target_ip = job["target_ip"]
     ports = job.get("ports") or []
     detailed_diagnostics = job.get("detailed_diagnostics") is True
+    diagnostic_port = int(job.get("diagnostic_port") or 80)
 
     print()
 
@@ -700,7 +702,8 @@ def process_scan_job(
         # --------------------------------------------------
 
         onvif_result = onvif_scanner.detect(
-            target_ip
+            target_ip,
+            ports=[diagnostic_port] if job.get("diagnostic_port") else None,
         )
 
         if onvif_result.detected:
@@ -855,7 +858,7 @@ def process_scan_job(
                         ip_address=target_ip,
                         username=onvif_username,
                         password=onvif_password,
-                        port=80,
+                        port=diagnostic_port,
                     )
                 )
 
@@ -890,37 +893,21 @@ def process_scan_job(
                     )
 
                 # Consulta recente por canal somente no diagnostico detalhado.
-                # A mesma instancia preserva as confirmacoes entre jobs.
+                # Cada job confirma atrasos sem usar evidencias de jobs anteriores.
                 try:
-                    recording_result = (
-                        hikvision_scanner.get_channels_recording_diagnostics(
-                            ip_address=target_ip,
-                            username=onvif_username,
-                            password=onvif_password,
-                            port=80,
-                            delay_threshold_seconds=180,
-                            confirmation_checks=2,
-                        )
+                    recordings = collect_recordings(
+                        ip_address=target_ip,
+                        username=onvif_username,
+                        password=onvif_password,
+                        port=diagnostic_port,
                     )
-                    diagnostics["recordings"] = recording_result.to_dict()
-                    diagnostics["recordings"]["delay_threshold_seconds"] = 180
-                    diagnostics["recordings"]["confirmation_checks"] = 2
-
-                    print(
-                        "[SCANNER] Gravacoes: "
-                        f"{recording_result.message}"
-                    )
-                    print(
-                        "[SCANNER] Horario do DVR: "
-                        f"{recording_result.device_local_time}"
-                    )
-                    for channel in recording_result.channels:
+                    diagnostics["recordings"] = recordings
+                    print(f"[SCANNER] Gravacoes: {recordings['message']}")
+                    for channel in recordings["channels"]:
                         print(
-                            f"[SCANNER] Canal {channel.channel}: "
-                            f"{channel.recording_status} - "
-                            f"atraso: {channel.recording_age_seconds} s - "
-                            "confirmacoes: "
-                            f"{channel.consecutive_delayed_checks}"
+                            f"[SCANNER] Canal {channel['channel']}: "
+                            f"{channel['recording_status']} - "
+                            f"atraso: {channel['recording_age_seconds']} s"
                         )
                 except Exception:
                     # Preserva o resultado do HD se a nova consulta falhar.
