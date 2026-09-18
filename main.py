@@ -8,6 +8,7 @@ from datetime import datetime
 
 from dotenv import load_dotenv
 from app.onvif_scanner import OnvifScanner
+from app.hikvision_scanner import HikvisionScanner
 from app.api_client import ApiClient
 from app.network_info_scanner import NetworkInfoScanner
 from app.ping_scanner import PingScanner
@@ -451,11 +452,13 @@ def process_scan_job(
     network_info_scanner: NetworkInfoScanner,
     service_scanner: ServiceScanner,
     onvif_scanner: OnvifScanner,
+    hikvision_scanner: HikvisionScanner,
 ):
 
     job_id = job["id"]
     target_ip = job["target_ip"]
     ports = job.get("ports") or []
+    detailed_diagnostics = job.get("detailed_diagnostics") is True
 
     print()
 
@@ -809,6 +812,168 @@ def process_scan_job(
             )
 
         # --------------------------------------------------
+        # DIAGNÓSTICO DETALHADO
+        # --------------------------------------------------
+
+        diagnostics = None
+
+        if detailed_diagnostics:
+
+            print(
+                "[SCANNER] Diagnóstico detalhado solicitado"
+            )
+
+            manufacturer = None
+
+            if (
+                onvif_device_info is not None
+                and onvif_device_info.resolved
+            ):
+                manufacturer = (
+                    onvif_device_info.manufacturer
+                )
+
+            is_hikvision = (
+                manufacturer is not None
+                and "hikvision"
+                in manufacturer.lower()
+            )
+
+            if (
+                is_hikvision
+                and onvif_username
+                and onvif_password
+            ):
+
+                print(
+                    "[SCANNER] Executando diagnóstico "
+                    "Hikvision"
+                )
+
+                storage_result = (
+                    hikvision_scanner.get_storage(
+                        ip_address=target_ip,
+                        username=onvif_username,
+                        password=onvif_password,
+                        port=80,
+                    )
+                )
+
+                diagnostics = {
+                    "manufacturer": "hikvision",
+                    "storage": (
+                        storage_result.to_dict()
+                    ),
+                }
+
+                if storage_result.resolved:
+
+                    print(
+                        "[SCANNER] Armazenamento: "
+                        f"{storage_result.message}"
+                    )
+
+                    for disk in storage_result.disks:
+
+                        print(
+                            f"[SCANNER] HD {disk.id}: "
+                            f"{disk.status} - "
+                            f"{disk.capacity_mb} MB - "
+                            f"{disk.property}"
+                        )
+
+                else:
+
+                    print(
+                        "[SCANNER] Armazenamento: "
+                        f"{storage_result.message}"
+                    )
+
+                # Consulta recente por canal somente no diagnostico detalhado.
+                # A mesma instancia preserva as confirmacoes entre jobs.
+                try:
+                    recording_result = (
+                        hikvision_scanner.get_channels_recording_diagnostics(
+                            ip_address=target_ip,
+                            username=onvif_username,
+                            password=onvif_password,
+                            port=80,
+                            delay_threshold_seconds=180,
+                            confirmation_checks=2,
+                        )
+                    )
+                    diagnostics["recordings"] = recording_result.to_dict()
+                    diagnostics["recordings"]["delay_threshold_seconds"] = 180
+                    diagnostics["recordings"]["confirmation_checks"] = 2
+
+                    print(
+                        "[SCANNER] Gravacoes: "
+                        f"{recording_result.message}"
+                    )
+                    print(
+                        "[SCANNER] Horario do DVR: "
+                        f"{recording_result.device_local_time}"
+                    )
+                    for channel in recording_result.channels:
+                        print(
+                            f"[SCANNER] Canal {channel.channel}: "
+                            f"{channel.recording_status} - "
+                            f"atraso: {channel.recording_age_seconds} s - "
+                            "confirmacoes: "
+                            f"{channel.consecutive_delayed_checks}"
+                        )
+                except Exception:
+                    # Preserva o resultado do HD se a nova consulta falhar.
+                    # Nao inclui detalhes da excecao que possam conter segredos.
+                    diagnostics["recordings"] = {
+                        "supported": None,
+                        "resolved": False,
+                        "configured_channels": None,
+                        "channels_with_recent_recording": None,
+                        "channels": [],
+                        "device_local_time": None,
+                        "duration_ms": None,
+                        "delay_threshold_seconds": 180,
+                        "confirmation_checks": 2,
+                        "message": "Erro ao executar diagnostico de gravacao",
+                    }
+                    print("[SCANNER] Diagnostico de gravacao nao concluido")
+
+            elif not is_hikvision:
+
+                diagnostics = {
+                    "manufacturer": (
+                        manufacturer
+                    ),
+                    "storage": None,
+                    "message": (
+                        "Diagnóstico detalhado ainda "
+                        "não disponível para este fabricante"
+                    ),
+                }
+
+                print(
+                    "[SCANNER] Diagnóstico detalhado: "
+                    "fabricante ainda não suportado"
+                )
+
+            else:
+
+                diagnostics = {
+                    "manufacturer": "hikvision",
+                    "storage": None,
+                    "message": (
+                        "Credenciais não disponíveis "
+                        "para o diagnóstico detalhado"
+                    ),
+                }
+
+                print(
+                    "[SCANNER] Diagnóstico Hikvision: "
+                    "credenciais não disponíveis"
+                )
+
+        # --------------------------------------------------
         # DURAÇÃO TOTAL
         # --------------------------------------------------
 
@@ -919,6 +1084,7 @@ def process_scan_job(
                 status_message
             ),
             "result": {
+                "diagnostics": diagnostics,
 
                 "network": {
                     "hostname": (
@@ -1140,6 +1306,7 @@ def scanner_loop(
     network_info_scanner: NetworkInfoScanner,
     service_scanner: ServiceScanner,
     onvif_scanner: OnvifScanner,
+    hikvision_scanner: HikvisionScanner,
 ):
 
     print(
@@ -1174,6 +1341,7 @@ def scanner_loop(
                 onvif_scanner=(
                     onvif_scanner
                 ),
+                hikvision_scanner=hikvision_scanner,
             )
 
             # Não dorme aqui.
@@ -1225,6 +1393,7 @@ def main():
     tcp_scanner = TcpScanner()
     
     onvif_scanner = OnvifScanner()
+    hikvision_scanner = HikvisionScanner()
 
     network_info_scanner = (
         NetworkInfoScanner()
@@ -1248,6 +1417,7 @@ def main():
                 network_info_scanner,
                 service_scanner,
                 onvif_scanner,
+                hikvision_scanner,
             ),
             daemon=True,
         )
