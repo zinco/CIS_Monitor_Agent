@@ -2187,7 +2187,9 @@ class HikvisionScanner:
             return "unknown", 0
         if not recording_found:
             return "no_recording", 0
-        if age_seconds is None or not (0 <= age_seconds < float("inf")):
+        # A consulta do relógio ocorre antes da pesquisa de gravações.
+        # Um segmento recém-criado pode ficar poucos segundos à frente.
+        if age_seconds is None or not (-5 <= age_seconds < float("inf")):
             return "unknown", 0
         if age_seconds <= threshold_seconds:
             return "within_tolerance", 0
@@ -2492,6 +2494,8 @@ class HikvisionScanner:
                     recording_age_seconds = (
                         device_now - latest_local
                     ).total_seconds()
+                    if -5 <= recording_age_seconds < 0:
+                        recording_age_seconds = 0.0
 
             recording_status, delayed_count = self._classify_recording_delay(
                 resolved=result.resolved,

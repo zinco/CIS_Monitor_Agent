@@ -10,6 +10,8 @@ from dotenv import load_dotenv
 from app.onvif_scanner import OnvifScanner
 from app.hikvision_scanner import HikvisionScanner
 from app.full_diagnostics import collect_recordings
+from app.hikvision_sdk import read_channel_signals
+from app.hikvision_signal import read_isapi_video_signals
 from app.api_client import ApiClient
 from app.network_info_scanner import NetworkInfoScanner
 from app.ping_scanner import PingScanner
@@ -842,6 +844,21 @@ def process_scan_job(
                 in manufacturer.lower()
             )
 
+            sdk_signals = None
+            # ONVIF pode rejeitar uma conta enquanto o protocolo nativo
+            # aceita o login. Uma leitura SDK bem-sucedida identifica o DVR.
+            if (
+                onvif_username
+                and onvif_password
+                and (is_hikvision or 8000 in open_ports)
+            ):
+                sdk_signals = read_channel_signals(
+                    target_ip, onvif_username, onvif_password,
+                    port=int(job.get("service_port") or 8000),
+                )
+                if sdk_signals.get("identified"):
+                    is_hikvision = True
+
             if (
                 is_hikvision
                 and onvif_username
@@ -868,6 +885,10 @@ def process_scan_job(
                         storage_result.to_dict()
                     ),
                 }
+
+                # HCNetSDK consulta somente o estado de trabalho do DVR.
+                # A porta SDK e independente da porta HTTP usada pela ISAPI.
+                diagnostics["signals"] = sdk_signals
 
                 if storage_result.resolved:
 
@@ -902,6 +923,22 @@ def process_scan_job(
                         port=diagnostic_port,
                     )
                     diagnostics["recordings"] = recordings
+                    if not diagnostics["signals"]["resolved"]:
+                        channel_numbers = [
+                            channel["channel"] for channel in recordings["channels"]
+                            if channel.get("channel") is not None
+                        ]
+                        isapi_signals = read_isapi_video_signals(
+                            target_ip, onvif_username, onvif_password,
+                            port=diagnostic_port,
+                            allowed_channels=channel_numbers or None,
+                        )
+                        if isapi_signals["channels"]:
+                            diagnostics["signals"] = isapi_signals
+                        else:
+                            diagnostics["signals"]["isapi_message"] = (
+                                isapi_signals["message"]
+                            )
                     print(f"[SCANNER] Gravacoes: {recordings['message']}")
                     for channel in recordings["channels"]:
                         print(
@@ -928,14 +965,22 @@ def process_scan_job(
 
             elif not is_hikvision:
 
+                authentication_failed = (
+                    onvif_device_info is not None
+                    and onvif_device_info.status_code in (401, 403)
+                )
+
                 diagnostics = {
                     "manufacturer": (
                         manufacturer
                     ),
                     "storage": None,
+                    "signals": sdk_signals,
                     "message": (
-                        "Diagnóstico detalhado ainda "
-                        "não disponível para este fabricante"
+                        "Autenticação ONVIF recusada; fabricante não identificado. "
+                        "Confira a conta do DVR e as permissões de acesso remoto."
+                        if authentication_failed else
+                        "Fabricante não identificado; diagnóstico detalhado indisponível"
                     ),
                 }
 
