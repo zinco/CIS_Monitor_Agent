@@ -12,6 +12,7 @@ from app.hikvision_scanner import HikvisionScanner
 from app.full_diagnostics import collect_recordings
 from app.hikvision_sdk import read_channel_signals
 from app.hikvision_signal import read_isapi_video_signals
+from app.intelbras_scanner import IntelbrasScanner
 from app.api_client import ApiClient
 from app.network_info_scanner import NetworkInfoScanner
 from app.ping_scanner import PingScanner
@@ -838,6 +839,16 @@ def process_scan_job(
                     onvif_device_info.manufacturer
                 )
 
+            registered_manufacturer = job.get("device_manufacturer")
+            if isinstance(registered_manufacturer, str) and "intelbras" in registered_manufacturer.lower():
+                manufacturer = registered_manufacturer
+            else:
+                manufacturer = manufacturer or registered_manufacturer
+            is_intelbras = (
+                isinstance(manufacturer, str)
+                and "intelbras" in manufacturer.lower()
+            )
+
             is_hikvision = (
                 manufacturer is not None
                 and "hikvision"
@@ -850,6 +861,7 @@ def process_scan_job(
             if (
                 onvif_username
                 and onvif_password
+                and not is_intelbras
                 and (is_hikvision or 8000 in open_ports)
             ):
                 sdk_signals = read_channel_signals(
@@ -962,6 +974,37 @@ def process_scan_job(
                         "message": "Erro ao executar diagnostico de gravacao",
                     }
                     print("[SCANNER] Diagnostico de gravacao nao concluido")
+
+            elif is_intelbras and onvif_username and onvif_password:
+                print("[SCANNER] Executando diagnóstico Intelbras")
+                intelbras_scanner = IntelbrasScanner()
+                diagnostics = {
+                    "manufacturer": "intelbras",
+                    "storage": intelbras_scanner.get_storage(
+                        target_ip, diagnostic_port, onvif_username, onvif_password,
+                    ),
+                    "signals": intelbras_scanner.get_camera_states(
+                        target_ip, diagnostic_port, onvif_username, onvif_password,
+                    ),
+                    "video_loss": intelbras_scanner.get_video_loss_events(
+                        target_ip, diagnostic_port, onvif_username, onvif_password,
+                    ),
+                    "recordings": intelbras_scanner.get_recordings(
+                        target_ip, diagnostic_port, onvif_username, onvif_password,
+                    ),
+                }
+                print(f"[SCANNER] Intelbras HD: {diagnostics['storage']['message']}")
+                print(f"[SCANNER] Intelbras câmeras: {diagnostics['signals']['message']}")
+                print(f"[SCANNER] Intelbras perda de vídeo: {diagnostics['video_loss']['message']}")
+                print(f"[SCANNER] Intelbras gravação: {diagnostics['recordings']['message']}")
+
+            elif is_intelbras:
+                diagnostics = {
+                    "manufacturer": "intelbras",
+                    "storage": None,
+                    "message": "Credenciais não disponíveis para o diagnóstico Intelbras",
+                }
+                print("[SCANNER] Diagnóstico Intelbras: credenciais não disponíveis")
 
             elif not is_hikvision:
 
